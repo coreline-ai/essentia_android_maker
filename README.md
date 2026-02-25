@@ -299,5 +299,3 @@ cd D:\project_new\essentia_android_maker\essentia_android_app
 - 결과: `BUILD SUCCESSFUL`
 
 ---
-
-필요하면 다음 단계로 `README`에 스크린샷 섹션, 릴리즈 서명/배포 절차, CI 파이프라인(`assembleDebug` 자동화)까지 확장할 수 있습니다.
