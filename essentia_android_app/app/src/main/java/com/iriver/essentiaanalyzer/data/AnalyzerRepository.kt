@@ -1,4 +1,4 @@
-package com.iriver.essentiaanalyzer.data
+﻿package com.iriver.essentiaanalyzer.data
 
 import android.content.Context
 import android.net.Uri
@@ -13,6 +13,10 @@ class AnalyzerRepository(
   companion object {
     const val ANALYSIS_SAMPLE_RATE = 44100
     const val MAX_DURATION_SECONDS = 15 * 60
+  }
+
+  fun probeSelectedAudio(context: Context, uri: Uri, fallbackDisplayName: String?): ProbedAudioInfo {
+    return decoder.probeAudioInfo(context, uri, fallbackDisplayName)
   }
 
   fun decodeAndPrepare(context: Context, uri: Uri): DecodedAudio {

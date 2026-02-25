@@ -146,19 +146,22 @@ std::vector<Real> downsampleEnvelope(const std::vector<Real>& signal, int target
   std::vector<Real> output;
   if (signal.empty() || targetPoints <= 0) return output;
 
-  const int n = static_cast<int>(signal.size());
-  const int bins = std::min(targetPoints, n);
-  output.reserve(static_cast<size_t>(bins));
+  const size_t n = signal.size();
+  const size_t bins = std::min(static_cast<size_t>(targetPoints), n);
+  if (bins == 0) return output;
+  output.reserve(bins);
 
-  for (int i = 0; i < bins; ++i) {
-    const int start = (i * n) / bins;
-    const int end = ((i + 1) * n) / bins;
+  for (size_t i = 0; i < bins; ++i) {
+    size_t start = (i * n) / bins;
+    size_t end = ((i + 1) * n) / bins;
+    start = std::min(start, n);
+    end = std::min(end, n);
     if (end <= start) {
       output.push_back(0.0f);
       continue;
     }
     Real acc = 0.0f;
-    for (int j = start; j < end; ++j) {
+    for (size_t j = start; j < end; ++j) {
       acc += std::fabs(signal[j]);
     }
     output.push_back(acc / static_cast<Real>(end - start));

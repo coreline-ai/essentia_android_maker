@@ -1,4 +1,4 @@
-package com.iriver.essentiaanalyzer.data
+﻿package com.iriver.essentiaanalyzer.data
 
 import android.content.Context
 import android.media.AudioFormat
@@ -11,6 +11,15 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.max
 
+data class ProbedAudioInfo(
+  val fileName: String,
+  val mimeType: String?,
+  val fileSizeBytes: Long?,
+  val durationSeconds: Double?,
+  val sampleRate: Int?,
+  val channelCount: Int?,
+)
+
 data class DecodedAudio(
   val pcmMono: FloatArray,
   val sampleRate: Int,
@@ -20,16 +29,65 @@ data class DecodedAudio(
 )
 
 class AudioDecoder {
+  fun probeAudioInfo(
+    context: Context,
+    uri: Uri,
+    fallbackDisplayName: String? = null,
+  ): ProbedAudioInfo {
+    val basicMeta = queryBasicFileMetadata(context, uri)
+    val extractor = MediaExtractor()
+
+    return try {
+      setExtractorDataSource(extractor, context, uri)
+      val trackIndex = findAudioTrack(extractor)
+      require(trackIndex >= 0) { "Audio track not found" }
+
+      extractor.selectTrack(trackIndex)
+      val format = extractor.getTrackFormat(trackIndex)
+
+      val mimeType = format.getString(MediaFormat.KEY_MIME) ?: basicMeta.mimeType
+      val durationSeconds = if (format.containsKey(MediaFormat.KEY_DURATION)) {
+        (format.getLong(MediaFormat.KEY_DURATION).takeIf { it > 0L } ?: -1L)
+          .takeIf { it > 0L }
+          ?.div(1_000_000.0)
+      } else {
+        null
+      }
+
+      val sampleRate = if (format.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+        format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+      } else {
+        null
+      }
+
+      val channelCount = if (format.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+        format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+      } else {
+        null
+      }
+
+      ProbedAudioInfo(
+        fileName = fallbackDisplayName ?: basicMeta.displayName ?: "selected_audio",
+        mimeType = mimeType,
+        fileSizeBytes = basicMeta.fileSizeBytes,
+        durationSeconds = durationSeconds,
+        sampleRate = sampleRate,
+        channelCount = channelCount,
+      )
+    } finally {
+      extractor.release()
+    }
+  }
+
   fun decodeToMono(
     context: Context,
     uri: Uri,
     maxDurationSeconds: Int = 900,
   ): DecodedAudio {
     val extractor = MediaExtractor()
+    val basicMeta = queryBasicFileMetadata(context, uri)
 
-    context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
-      extractor.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
-    } ?: extractor.setDataSource(context, uri, null)
+    setExtractorDataSource(extractor, context, uri)
 
     val trackIndex = findAudioTrack(extractor)
     require(trackIndex >= 0) { "Audio track not found" }
@@ -147,8 +205,44 @@ class AudioDecoder {
       sampleRate = sourceSampleRate,
       channelCount = sourceChannels,
       durationSeconds = finalDuration,
-      displayName = queryDisplayName(context, uri),
+      displayName = basicMeta.displayName ?: "selected_audio",
     )
+  }
+
+  private fun queryBasicFileMetadata(context: Context, uri: Uri): BasicFileMetadata {
+    val mimeType = context.contentResolver.getType(uri)
+
+    var displayName: String? = null
+    var fileSizeBytes: Long? = null
+
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
+      ?.use { cursor ->
+        if (cursor.moveToFirst()) {
+          val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+          if (nameIndex >= 0 && !cursor.isNull(nameIndex)) {
+            displayName = cursor.getString(nameIndex)
+          }
+
+          val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+          if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+            fileSizeBytes = cursor.getLong(sizeIndex)
+          }
+        }
+      }
+
+    return BasicFileMetadata(
+      displayName = displayName,
+      mimeType = mimeType,
+      fileSizeBytes = fileSizeBytes,
+    )
+  }
+
+  private fun setExtractorDataSource(extractor: MediaExtractor, context: Context, uri: Uri) {
+    context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+      extractor.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+      return
+    }
+    extractor.setDataSource(context, uri, null)
   }
 
   private fun findAudioTrack(extractor: MediaExtractor): Int {
@@ -230,18 +324,13 @@ class AudioDecoder {
       output.append(sum / channelCount)
     }
   }
-
-  private fun queryDisplayName(context: Context, uri: Uri): String {
-    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-      ?.use { cursor ->
-        val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-        if (index >= 0 && cursor.moveToFirst()) {
-          return cursor.getString(index) ?: "selected_audio"
-        }
-      }
-    return "selected_audio"
-  }
 }
+
+private data class BasicFileMetadata(
+  val displayName: String?,
+  val mimeType: String?,
+  val fileSizeBytes: Long?,
+)
 
 private class FloatAccumulator(initialCapacity: Int = 1024) {
   private var data = FloatArray(initialCapacity.coerceAtLeast(1))
