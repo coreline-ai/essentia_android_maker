@@ -9,17 +9,17 @@ import com.iriver.essentiaanalyzer.nativebridge.EssentiaNativeBridge
 class AnalyzerRepository(
   private val decoder: AudioDecoder = AudioDecoder(),
   private val resampler: LinearResampler = LinearResampler(),
-) {
+) : AnalyzerDataSource {
   companion object {
     const val ANALYSIS_SAMPLE_RATE = 44100
     const val MAX_DURATION_SECONDS = 15 * 60
   }
 
-  fun probeSelectedAudio(context: Context, uri: Uri, fallbackDisplayName: String?): ProbedAudioInfo {
+  override fun probeSelectedAudio(context: Context, uri: Uri, fallbackDisplayName: String?): ProbedAudioInfo {
     return decoder.probeAudioInfo(context, uri, fallbackDisplayName)
   }
 
-  fun decodeAndPrepare(context: Context, uri: Uri): DecodedAudio {
+  override fun decodeAndPrepare(context: Context, uri: Uri): DecodedAudio {
     val decoded = decoder.decodeToMono(
       context = context,
       uri = uri,
@@ -40,7 +40,7 @@ class AnalyzerRepository(
     )
   }
 
-  fun analyzePreparedAudio(audio: DecodedAudio): AnalysisResult {
+  override fun analyzePreparedAudio(audio: DecodedAudio): AnalysisResult {
     val json = EssentiaNativeBridge.analyzePcmFloat(
       pcmMono = audio.pcmMono,
       sampleRate = audio.sampleRate,

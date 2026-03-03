@@ -169,6 +169,33 @@ std::vector<Real> downsampleEnvelope(const std::vector<Real>& signal, int target
   return output;
 }
 
+std::vector<Real> downsampleMean(const std::vector<Real>& values, int targetPoints) {
+  std::vector<Real> output;
+  if (values.empty() || targetPoints <= 0) return output;
+
+  const size_t n = values.size();
+  const size_t bins = std::min(static_cast<size_t>(targetPoints), n);
+  if (bins == 0) return output;
+  output.reserve(bins);
+
+  for (size_t i = 0; i < bins; ++i) {
+    size_t start = (i * n) / bins;
+    size_t end = ((i + 1) * n) / bins;
+    start = std::min(start, n);
+    end = std::min(end, n);
+    if (end <= start) {
+      output.push_back(0.0f);
+      continue;
+    }
+    Real acc = 0.0f;
+    for (size_t j = start; j < end; ++j) {
+      acc += values[j];
+    }
+    output.push_back(acc / static_cast<Real>(end - start));
+  }
+  return output;
+}
+
 void appendError(std::vector<ErrorItem>& errors, const std::string& algorithm, const std::string& message) {
   errors.push_back({algorithm, message});
 }
@@ -537,6 +564,8 @@ std::string analyzeSignalToJson(const std::vector<Real>& signal, int sampleRate,
   }
 
   const std::vector<Real> waveformEnvelope = downsampleEnvelope(signal, 240);
+  const std::vector<Real> spectralCentroidSeriesChart = downsampleMean(spectralCentroidSeries, 600);
+  const std::vector<Real> onsetStrengthSeriesChart = downsampleMean(onsetStrengthSeries, 600);
   const auto t1 = std::chrono::steady_clock::now();
   const double elapsedMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
@@ -623,8 +652,8 @@ std::string analyzeSignalToJson(const std::vector<Real>& signal, int sampleRate,
 
   std::vector<std::pair<std::string, std::string>> seriesObject = {
       {"waveformEnvelope", jsonNumberArray(waveformEnvelope)},
-      {"spectralCentroid", jsonNumberArray(spectralCentroidSeries)},
-      {"onsetStrength", jsonNumberArray(onsetStrengthSeries)},
+      {"spectralCentroid", jsonNumberArray(spectralCentroidSeriesChart)},
+      {"onsetStrength", jsonNumberArray(onsetStrengthSeriesChart)},
       {"bpmHistogram", bpmHistogramJson.str()}
   };
 

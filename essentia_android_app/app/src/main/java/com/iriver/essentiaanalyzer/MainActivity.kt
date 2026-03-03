@@ -40,13 +40,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.iriver.essentiaanalyzer.model.AnalysisResult
 import com.iriver.essentiaanalyzer.model.AnalysisStatus
+import com.iriver.essentiaanalyzer.model.groupWarningsByAlgorithm
+import com.iriver.essentiaanalyzer.model.isFatalAnalysisError
+import com.iriver.essentiaanalyzer.ui.AnalysisExplanationCards
 import com.iriver.essentiaanalyzer.ui.AnalyzerUiState
 import com.iriver.essentiaanalyzer.ui.AnalyzerViewModel
 import com.iriver.essentiaanalyzer.ui.SelectedFileInfo
@@ -126,13 +132,17 @@ fun EssentiaAnalyzerApp(
           selected = selectedTab == 0,
           onClick = { selectedTab = 0 },
           text = { Text("파일 선택/정보") },
-          modifier = Modifier.height(56.dp),
+          modifier = Modifier
+            .height(56.dp)
+            .testTag("tab_file_select_info"),
         )
         Tab(
           selected = selectedTab == 1,
           onClick = { selectedTab = 1 },
           text = { Text("분석/상세 내역") },
-          modifier = Modifier.height(56.dp),
+          modifier = Modifier
+            .height(56.dp)
+            .testTag("tab_analyze_details"),
         )
       }
     },
@@ -254,7 +264,13 @@ private fun AnalyzeDetailsTab(
       Text("분석 시작")
     }
 
-    if (!state.isNativeAvailable) {
+    if (!state.isNativeAvailable && state.isNativeInitializing) {
+      Text(
+        text = "네이티브 엔진 초기화 중입니다.",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.bodyMedium,
+      )
+    } else if (!state.isNativeAvailable) {
       Text(
         text = "네이티브 엔진이 준비되지 않았습니다.",
         color = Color(0xFFB3261E),
@@ -311,6 +327,10 @@ private fun AnalysisResultPanel(result: AnalysisResult?) {
     }
 
     item {
+      AnalysisExplanationCards(result = result)
+    }
+
+    item {
       Text("Meta", style = MaterialTheme.typography.titleMedium)
       KeyValueSection(result.meta)
     }
@@ -354,6 +374,47 @@ private fun AnalysisResultPanel(result: AnalysisResult?) {
     item { KeyValueSection(result.stats) }
 
     val fatalErrors = result.errors.filter(::isFatalAnalysisError)
+    val warningGroups = groupWarningsByAlgorithm(result.errors)
+    val warningCount = warningGroups.sumOf { it.messages.size }
+
+    if (warningGroups.isNotEmpty()) {
+      item {
+        Text(
+          "Warnings ($warningCount)",
+          style = MaterialTheme.typography.titleMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+
+      warningGroups.forEach { (algorithm, errorsByAlgorithm) ->
+        item {
+          Text(
+            text = "- $algorithm (${errorsByAlgorithm.size})",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+          )
+        }
+        errorsByAlgorithm.take(2).forEach { err ->
+          item {
+            Text(
+              text = "  · $err",
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              style = MaterialTheme.typography.bodySmall,
+            )
+          }
+        }
+        if (errorsByAlgorithm.size > 2) {
+          item {
+            Text(
+              text = "  ... ${errorsByAlgorithm.size - 2} more",
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              style = MaterialTheme.typography.bodySmall,
+            )
+          }
+        }
+      }
+    }
+
     if (fatalErrors.isNotEmpty()) {
       item { Text("Errors", style = MaterialTheme.typography.titleMedium, color = Color(0xFFB3261E)) }
       items(fatalErrors) { err ->
@@ -398,9 +459,14 @@ private fun LineChartCard(
   values: List<Float>,
   color: Color,
 ) {
+  val plottedValues = remember(values) { downsampleSeriesForChart(values, maxPoints = 1200) }
+  val minV = remember(plottedValues) { plottedValues.minOrNull() ?: 0f }
+  val maxV = remember(plottedValues) { plottedValues.maxOrNull() ?: 1f }
+  val range = remember(minV, maxV) { (maxV - minV).takeIf { it > 1e-9f } ?: 1f }
+
   Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
     Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-    if (values.isEmpty()) {
+    if (plottedValues.isEmpty()) {
       Text("No data", color = MaterialTheme.colorScheme.onSurfaceVariant)
       return
     }
@@ -410,18 +476,23 @@ private fun LineChartCard(
         .fillMaxWidth()
         .height(160.dp),
     ) {
-      val maxV = values.maxOrNull() ?: 1f
-      val minV = values.minOrNull() ?: 0f
-      val range = (maxV - minV).takeIf { it > 1e-9f } ?: 1f
-      val stepX = size.width / max(1, values.size - 1)
-
-      for (i in 1 until values.size) {
-        val x0 = (i - 1) * stepX
-        val x1 = i * stepX
-        val y0 = size.height - ((values[i - 1] - minV) / range) * size.height
-        val y1 = size.height - ((values[i] - minV) / range) * size.height
-        drawLine(color = color, start = Offset(x0, y0), end = Offset(x1, y1), strokeWidth = 2.5f)
+      if (plottedValues.size == 1) {
+        val y = size.height - ((plottedValues[0] - minV) / range) * size.height
+        drawCircle(color = color, radius = 3f, center = Offset(0f, y))
+        return@Canvas
       }
+
+      val stepX = size.width / max(1, plottedValues.size - 1)
+      val path = Path()
+      val firstY = size.height - ((plottedValues[0] - minV) / range) * size.height
+      path.moveTo(0f, firstY)
+
+      for (i in 1 until plottedValues.size) {
+        val x = i * stepX
+        val y = size.height - ((plottedValues[i] - minV) / range) * size.height
+        path.lineTo(x, y)
+      }
+      drawPath(path = path, color = color, style = Stroke(width = 2.5f))
     }
   }
 }
@@ -493,11 +564,24 @@ private fun formatChannel(channelCount: Int?): String {
   return channelCount.toString()
 }
 
-private fun isFatalAnalysisError(error: com.iriver.essentiaanalyzer.model.AnalysisError): Boolean {
-  val algorithm = error.algorithm.lowercase(Locale.US)
-  val message = error.message.lowercase(Locale.US)
-  return algorithm == "native" ||
-    message.contains("fatal") ||
-    message.contains("null pcm input") ||
-    message.contains("invalid sample rate")
+private fun downsampleSeriesForChart(values: List<Float>, maxPoints: Int): List<Float> {
+  if (values.isEmpty() || maxPoints <= 0) return emptyList()
+  if (values.size <= maxPoints) return values
+
+  val n = values.size
+  val out = ArrayList<Float>(maxPoints)
+  for (i in 0 until maxPoints) {
+    val start = (i * n) / maxPoints
+    val end = ((i + 1) * n) / maxPoints
+    if (end <= start) {
+      out.add(values[start.coerceIn(0, n - 1)])
+      continue
+    }
+    var sum = 0f
+    for (j in start until end) {
+      sum += values[j]
+    }
+    out.add(sum / (end - start))
+  }
+  return out
 }

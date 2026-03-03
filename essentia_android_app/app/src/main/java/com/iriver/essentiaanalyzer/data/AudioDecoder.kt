@@ -85,128 +85,143 @@ class AudioDecoder {
     maxDurationSeconds: Int = 900,
   ): DecodedAudio {
     val extractor = MediaExtractor()
+    var decoder: MediaCodec? = null
+    var decoderStarted = false
     val basicMeta = queryBasicFileMetadata(context, uri)
+    try {
+      setExtractorDataSource(extractor, context, uri)
 
-    setExtractorDataSource(extractor, context, uri)
+      val trackIndex = findAudioTrack(extractor)
+      require(trackIndex >= 0) { "Audio track not found" }
 
-    val trackIndex = findAudioTrack(extractor)
-    require(trackIndex >= 0) { "Audio track not found" }
+      extractor.selectTrack(trackIndex)
+      val format = extractor.getTrackFormat(trackIndex)
+      val mime = format.getString(MediaFormat.KEY_MIME)
+        ?: throw IllegalArgumentException("Missing audio mime type")
 
-    extractor.selectTrack(trackIndex)
-    val format = extractor.getTrackFormat(trackIndex)
-    val mime = format.getString(MediaFormat.KEY_MIME)
-      ?: throw IllegalArgumentException("Missing audio mime type")
-
-    val durationUs = if (format.containsKey(MediaFormat.KEY_DURATION)) {
-      format.getLong(MediaFormat.KEY_DURATION)
-    } else {
-      -1L
-    }
-
-    if (durationUs > 0) {
-      val durationSeconds = durationUs / 1_000_000.0
-      require(durationSeconds <= maxDurationSeconds) {
-        "Audio too long (${durationSeconds.toInt()}s). Max allowed: ${maxDurationSeconds}s"
+      val durationUs = if (format.containsKey(MediaFormat.KEY_DURATION)) {
+        format.getLong(MediaFormat.KEY_DURATION)
+      } else {
+        -1L
       }
-    }
 
-    val sourceSampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-    val sourceChannels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+      if (durationUs > 0) {
+        val durationSeconds = durationUs / 1_000_000.0
+        require(durationSeconds <= maxDurationSeconds) {
+          "Audio too long (${durationSeconds.toInt()}s). Max allowed: ${maxDurationSeconds}s"
+        }
+      }
 
-    val decoder = MediaCodec.createDecoderByType(mime)
-    decoder.configure(format, null, null, 0)
-    decoder.start()
+      val sourceSampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+      val sourceChannels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+      val maxOutputSamples = maxDurationSeconds.toLong() * sourceSampleRate.toLong()
 
-    val info = MediaCodec.BufferInfo()
-    val output = FloatAccumulator(initialCapacity = max(4096, sourceSampleRate * 30))
+      val codec = MediaCodec.createDecoderByType(mime)
+      decoder = codec
+      codec.configure(format, null, null, 0)
+      codec.start()
+      decoderStarted = true
 
-    var inputDone = false
-    var outputDone = false
-    var outChannels = sourceChannels
-    var outEncoding = AudioFormat.ENCODING_PCM_16BIT
+      val info = MediaCodec.BufferInfo()
+      val output = FloatAccumulator(initialCapacity = max(4096, sourceSampleRate * 30))
 
-    while (!outputDone) {
-      if (!inputDone) {
-        val inputBufferIndex = decoder.dequeueInputBuffer(10_000)
-        if (inputBufferIndex >= 0) {
-          val inputBuffer = decoder.getInputBuffer(inputBufferIndex)
-            ?: throw IllegalStateException("Decoder input buffer is null")
+      var inputDone = false
+      var outputDone = false
+      var outChannels = sourceChannels
+      var outEncoding = AudioFormat.ENCODING_PCM_16BIT
 
-          val sampleSize = extractor.readSampleData(inputBuffer, 0)
-          if (sampleSize < 0) {
-            decoder.queueInputBuffer(
-              inputBufferIndex,
-              0,
-              0,
-              0,
-              MediaCodec.BUFFER_FLAG_END_OF_STREAM,
-            )
-            inputDone = true
-          } else {
-            decoder.queueInputBuffer(
-              inputBufferIndex,
-              0,
-              sampleSize,
-              extractor.sampleTime,
-              0,
-            )
-            extractor.advance()
+      while (!outputDone) {
+        throwIfInterrupted()
+
+        if (!inputDone) {
+          val inputBufferIndex = codec.dequeueInputBuffer(10_000)
+          if (inputBufferIndex >= 0) {
+            val inputBuffer = codec.getInputBuffer(inputBufferIndex)
+              ?: throw IllegalStateException("Decoder input buffer is null")
+
+            val sampleSize = extractor.readSampleData(inputBuffer, 0)
+            if (sampleSize < 0) {
+              codec.queueInputBuffer(
+                inputBufferIndex,
+                0,
+                0,
+                0,
+                MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+              )
+              inputDone = true
+            } else {
+              codec.queueInputBuffer(
+                inputBufferIndex,
+                0,
+                sampleSize,
+                extractor.sampleTime,
+                0,
+              )
+              extractor.advance()
+            }
+          }
+        }
+
+        val outputBufferIndex = codec.dequeueOutputBuffer(info, 10_000)
+        when {
+          outputBufferIndex >= 0 -> {
+            val outputBuffer = codec.getOutputBuffer(outputBufferIndex)
+            if (outputBuffer != null && info.size > 0) {
+              outputBuffer.position(info.offset)
+              outputBuffer.limit(info.offset + info.size)
+              appendDecodedChunk(
+                outputBuffer = outputBuffer,
+                bytes = info.size,
+                pcmEncoding = outEncoding,
+                channelCount = outChannels,
+                output = output,
+              )
+              if (output.length.toLong() > maxOutputSamples) {
+                throw IllegalArgumentException(
+                  "Audio too long (${maxDurationSeconds}s+). Max allowed: ${maxDurationSeconds}s"
+                )
+              }
+            }
+
+            codec.releaseOutputBuffer(outputBufferIndex, false)
+            if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+              outputDone = true
+            }
+          }
+
+          outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+            val outFormat = codec.outputFormat
+            outChannels = outFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            outEncoding = if (outFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+              outFormat.getInteger(MediaFormat.KEY_PCM_ENCODING)
+            } else {
+              AudioFormat.ENCODING_PCM_16BIT
+            }
           }
         }
       }
 
-      val outputBufferIndex = decoder.dequeueOutputBuffer(info, 10_000)
-      when {
-        outputBufferIndex >= 0 -> {
-          val outputBuffer = decoder.getOutputBuffer(outputBufferIndex)
-          if (outputBuffer != null && info.size > 0) {
-            outputBuffer.position(info.offset)
-            outputBuffer.limit(info.offset + info.size)
-            appendDecodedChunk(
-              outputBuffer = outputBuffer,
-              bytes = info.size,
-              pcmEncoding = outEncoding,
-              channelCount = outChannels,
-              output = output,
-            )
-          }
+      val pcm = output.toArray()
+      val finalDuration = pcm.size.toDouble() / sourceSampleRate
 
-          decoder.releaseOutputBuffer(outputBufferIndex, false)
-          if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-            outputDone = true
-          }
-        }
-
-        outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-          val outFormat = decoder.outputFormat
-          outChannels = outFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-          outEncoding = if (outFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
-            outFormat.getInteger(MediaFormat.KEY_PCM_ENCODING)
-          } else {
-            AudioFormat.ENCODING_PCM_16BIT
-          }
-        }
+      require(finalDuration <= maxDurationSeconds) {
+        "Audio too long (${finalDuration.toInt()}s). Max allowed: ${maxDurationSeconds}s"
       }
+
+      return DecodedAudio(
+        pcmMono = pcm,
+        sampleRate = sourceSampleRate,
+        channelCount = sourceChannels,
+        durationSeconds = finalDuration,
+        displayName = basicMeta.displayName ?: "selected_audio",
+      )
+    } finally {
+      if (decoderStarted) {
+        runCatching { decoder?.stop() }
+      }
+      runCatching { decoder?.release() }
+      runCatching { extractor.release() }
     }
-
-    decoder.stop()
-    decoder.release()
-    extractor.release()
-
-    val pcm = output.toArray()
-    val finalDuration = pcm.size.toDouble() / sourceSampleRate
-
-    require(finalDuration <= maxDurationSeconds) {
-      "Audio too long (${finalDuration.toInt()}s). Max allowed: ${maxDurationSeconds}s"
-    }
-
-    return DecodedAudio(
-      pcmMono = pcm,
-      sampleRate = sourceSampleRate,
-      channelCount = sourceChannels,
-      durationSeconds = finalDuration,
-      displayName = basicMeta.displayName ?: "selected_audio",
-    )
   }
 
   private fun queryBasicFileMetadata(context: Context, uri: Uri): BasicFileMetadata {
@@ -239,8 +254,14 @@ class AudioDecoder {
 
   private fun setExtractorDataSource(extractor: MediaExtractor, context: Context, uri: Uri) {
     context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
-      extractor.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
-      return
+      val configured = runCatching {
+        if (afd.length >= 0L) {
+          extractor.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+        } else {
+          extractor.setDataSource(afd.fileDescriptor)
+        }
+      }.isSuccess
+      if (configured) return
     }
     extractor.setDataSource(context, uri, null)
   }
@@ -316,6 +337,9 @@ class AudioDecoder {
 
     val frames = interleaved.size / channelCount
     for (f in 0 until frames) {
+      if ((f and 0x3FF) == 0) {
+        throwIfInterrupted()
+      }
       var sum = 0.0f
       val base = f * channelCount
       for (c in 0 until channelCount) {
@@ -323,6 +347,12 @@ class AudioDecoder {
       }
       output.append(sum / channelCount)
     }
+  }
+}
+
+private fun throwIfInterrupted() {
+  if (Thread.currentThread().isInterrupted) {
+    throw InterruptedException("Audio decode canceled")
   }
 }
 
@@ -335,6 +365,8 @@ private data class BasicFileMetadata(
 private class FloatAccumulator(initialCapacity: Int = 1024) {
   private var data = FloatArray(initialCapacity.coerceAtLeast(1))
   private var size = 0
+  val length: Int
+    get() = size
 
   fun append(value: Float) {
     ensureCapacity(size + 1)

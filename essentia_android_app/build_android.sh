@@ -7,7 +7,7 @@ ABI="${ABI:-arm64-v8a}"
 API="${API:-}"
 PREFIX="${PREFIX:-}"
 MODE="${MODE:-release}"
-STD="${STD:-c++14}"
+STD="${STD:-c++17}"
 IGNORE_ALGOS="${IGNORE_ALGOS:-LPC}"
 CLEAN="${CLEAN:-1}"
 PACKAGE="${PACKAGE:-0}"
@@ -23,7 +23,7 @@ Options:
   --api <level>      Android API level (default: 21 for 64-bit, 16 for 32-bit)
   --prefix <path>    Install prefix (default: ./android-install/<abi>)
   --mode <mode>      Waf mode: release (default), debug, default
-  --std <std>        C++ standard for waf (default: c++14)
+  --std <std>        C++ standard for waf (default: c++17)
   --ignore-algos <x> Algorithms to ignore (default: LPC)
   --package          Build/install and then package artifacts
   --package-only     Skip build/install and package from existing --prefix
@@ -196,12 +196,20 @@ detect_host_tag() {
   case "$host_os" in
     Darwin) host_os="darwin" ;;
     Linux) host_os="linux" ;;
+    MINGW*|MSYS*|CYGWIN*) host_os="windows" ;;
     *) echo "Unsupported host OS: $host_os" >&2; exit 1 ;;
   esac
 
   case "$host_arch" in
     x86_64|amd64) host_arch="x86_64" ;;
-    arm64|aarch64) host_arch="arm64" ;;
+    arm64|aarch64)
+      if [[ "$host_os" == "windows" ]]; then
+        # Android NDK prebuilt host toolchains are commonly distributed as windows-x86_64.
+        host_arch="x86_64"
+      else
+        host_arch="arm64"
+      fi
+      ;;
     *) echo "Unsupported host architecture: $host_arch" >&2; exit 1 ;;
   esac
 
@@ -224,6 +232,23 @@ default_api_for_abi() {
     armeabi-v7a|x86) echo "16" ;;
     *) echo "21" ;;
   esac
+}
+
+resolve_tool_path() {
+  local base="$1"
+  if [[ -x "$base" ]]; then
+    echo "$base"
+    return
+  fi
+  if [[ -f "$base.cmd" ]]; then
+    echo "$base.cmd"
+    return
+  fi
+  if [[ -f "$base.exe" ]]; then
+    echo "$base.exe"
+    return
+  fi
+  return 1
 }
 
 command -v python3 >/dev/null || { echo "python3 is required"; exit 1; }
@@ -250,13 +275,23 @@ fi
 [[ -n "$API" ]] || API="$(default_api_for_abi "$ABI")"
 TARGET_TRIPLE="$(map_abi_to_target "$ABI")"
 
-C_COMPILER="$TOOLCHAIN_BIN/${TARGET_TRIPLE}${API}-clang"
-CXX_COMPILER="$TOOLCHAIN_BIN/${TARGET_TRIPLE}${API}-clang++"
-AR_TOOL="$TOOLCHAIN_BIN/llvm-ar"
+C_COMPILER_BASE="$TOOLCHAIN_BIN/${TARGET_TRIPLE}${API}-clang"
+CXX_COMPILER_BASE="$TOOLCHAIN_BIN/${TARGET_TRIPLE}${API}-clang++"
+AR_TOOL_BASE="$TOOLCHAIN_BIN/llvm-ar"
+CLANG_BIN_BASE="$TOOLCHAIN_BIN/clang"
+CLANGXX_BIN_BASE="$TOOLCHAIN_BIN/clang++"
 
-[[ -x "$C_COMPILER" ]] || { echo "Compiler not found: $C_COMPILER" >&2; exit 1; }
-[[ -x "$CXX_COMPILER" ]] || { echo "Compiler not found: $CXX_COMPILER" >&2; exit 1; }
-[[ -x "$AR_TOOL" ]] || { echo "Archiver not found: $AR_TOOL" >&2; exit 1; }
+C_COMPILER="$(resolve_tool_path "$C_COMPILER_BASE" || true)"
+CXX_COMPILER="$(resolve_tool_path "$CXX_COMPILER_BASE" || true)"
+AR_TOOL="$(resolve_tool_path "$AR_TOOL_BASE" || true)"
+CLANG_BIN="$(resolve_tool_path "$CLANG_BIN_BASE" || true)"
+CLANGXX_BIN="$(resolve_tool_path "$CLANGXX_BIN_BASE" || true)"
+
+[[ -n "$C_COMPILER" ]] || { echo "Compiler not found: ${C_COMPILER_BASE}(.cmd/.exe)" >&2; exit 1; }
+[[ -n "$CXX_COMPILER" ]] || { echo "Compiler not found: ${CXX_COMPILER_BASE}(.cmd/.exe)" >&2; exit 1; }
+[[ -n "$AR_TOOL" ]] || { echo "Archiver not found: ${AR_TOOL_BASE}(.cmd/.exe)" >&2; exit 1; }
+[[ -n "$CLANG_BIN" ]] || { echo "Clang binary not found: ${CLANG_BIN_BASE}(.cmd/.exe)" >&2; exit 1; }
+[[ -n "$CLANGXX_BIN" ]] || { echo "Clang++ binary not found: ${CLANGXX_BIN_BASE}(.cmd/.exe)" >&2; exit 1; }
 
 mkdir -p "$PREFIX"
 
@@ -265,12 +300,12 @@ mkdir -p "$WRAPPER_BIN"
 
 cat > "$WRAPPER_BIN/clang" <<EOF
 #!/usr/bin/env bash
-exec "$TOOLCHAIN_BIN/clang" --target=${TARGET_TRIPLE}${API} "\$@"
+exec "$CLANG_BIN" --target=${TARGET_TRIPLE}${API} "\$@"
 EOF
 
 cat > "$WRAPPER_BIN/clang++" <<EOF
 #!/usr/bin/env bash
-exec "$TOOLCHAIN_BIN/clang++" --target=${TARGET_TRIPLE}${API} "\$@"
+exec "$CLANGXX_BIN" --target=${TARGET_TRIPLE}${API} "\$@"
 EOF
 
 cat > "$WRAPPER_BIN/ar" <<EOF
